@@ -29,7 +29,7 @@
 - **Python 3.10+**（[下载](https://www.python.org/downloads/)，安装时务必勾选 "Add Python to PATH"）
 - **Ollama**（[下载](https://ollama.com/download)），安装后会自动在后台运行
 - **麦克风**（语音输入需要，浏览器首次使用会请求权限）
-- 至少 **16 GB 内存**（7B 模型推荐；1.5B 模型 8 GB 可跑）
+- 至少 **16 GB 内存**（8B 模型推荐；1.5B 模型 8 GB 可跑）
 
 ## 🚀 快速开始
 
