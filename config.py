@@ -18,7 +18,7 @@ def _path(env_key: str, default_rel: str) -> Path:
 
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "deepseek-r1:7b")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "deepseek-r1:8b")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "bge-m3")
 
 DOC_DIR = _path("DOC_DIR", "documents")
