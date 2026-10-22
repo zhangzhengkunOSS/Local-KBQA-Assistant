@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>本地私有知识库助手</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; max-width: 880px; margin: 16px auto; padding: 0 16px; background: #f5f5f5; color: #222; }
+  header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  h2 { margin: 0; }
+  .info { font-size: 12px; color: #666; }
+  .info code { background: #eee; padding: 1px 6px; border-radius: 4px; }
+  #messages { background: white; border-radius: 8px; padding: 16px; min-height: 380px; max-height: 60vh; overflow-y: auto; margin: 12px 0; }
+  .msg { margin-bottom: 12px; padding: 10px 14px; border-radius: 8px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .user { background: #e3f2fd; }
+  .assistant { background: #f0f0f0; }
+  .meta { font-size: 11px; color: #999; margin: 4px 0; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { padding: 8px 14px; border: none; border-radius: 6px; cursor: pointer; background: #1976d2; color: white; font-size: 14px; }
+  button:hover { background: #1565c0; }
+  button:disabled { background: #ccc; cursor: not-allowed; }
+  button.recording { background: #d32f2f; }
+  button.warn { background: #f57c00; }
+  button.warn:hover { background: #ef6c00; }
+  button.gray { background: #757575; }
+  button.gray:hover { background: #616161; }
+  #input-row { display: flex; gap: 8px; }
+  #input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+  #status { font-size: 12px; color: #666; margin-top: 8px; min-height: 18px; }
+  label { font-size: 13px; color: #444; }
+</style>
+</head>
+<body>
+<header>
+  <h2>本地私有知识库助手</h2>
+  <div class="info">
+    对话 <code id="chatModel">-</code>
+    · 嵌入 <code id="embedModel">-</code>
+    · 片段 <code id="kbCount">-</code>
+  </div>
+</header>
+
+<div class="controls">
+  <button id="recordBtn">🎤 语音输入</button>
+  <button id="stopBtn" class="warn" disabled>⏹ 停止生成</button>
+  <button id="reindexBtn" class="gray">🔄 刷新知识库</button>
+  <button id="clearBtn" class="gray">🗑 清空历史</button>
+  <label><input type="checkbox" id="ttsToggle" checked> 朗读回答</label>
+</div>
+
+<div id="messages"></div>
+
+<div id="input-row">
+  <input id="input" placeholder="输入问题，回车发送..." autocomplete="off">
+  <button id="sendBtn">发送</button>
+</div>
+<div id="status"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const messagesEl = $("messages");
+const inputEl = $("input");
+const sendBtn = $("sendBtn");
+const recordBtn = $("recordBtn");
+const stopBtn = $("stopBtn");
+const reindexBtn = $("reindexBtn");
+const clearBtn = $("clearBtn");
+const ttsToggle = $("ttsToggle");
+const statusEl = $("status");
+const SESSION_ID = "default";
+
+let currentController = null;
+let recording = false;
+let audioContext = null;
+let mediaStream = null;
+let processor = null;
+let pcmChunks = [];
+let ttsBuffer = "";
+
+function setStatus(s) { statusEl.textContent = s; }
+
+function addMessage(role, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.textContent = text;
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+function speak(sentence) {
+  if (!ttsToggle.checked || !sentence.trim()) return;
+  const u = new SpeechSynthesisUtterance(sentence);
+  u.lang = "zh-CN";
+  u.rate = 1.0;
+  const zh = speechSynthesis.getVoices().find(v => v.lang && v.lang.startsWith("zh"));
+  if (zh) u.voice = zh;
+  speechSynthesis.speak(u);
+}
+
+function stopTTS() {
+  speechSynthesis.cancel();
+  ttsBuffer = "";
+}
+
+async function loadConfig() {
+  try {
+    const r = await fetch("/api/config");
+    const d = await r.json();
+    $("chatModel").textContent = d.chat_model;
+    $("embedModel").textContent = d.embed_model;
+    $("kbCount").textContent = d.knowledge_count;
+  } catch (e) { /* ignore */ }
+}
+
+async function sendQuestion(query) {
+  if (!query.trim() || currentController) return;
+
+  addMessage("user", query);
+  inputEl.value = "";
+  stopTTS();
+
+  const metaDiv = document.createElement("div");
+  metaDiv.className = "meta";
+  messagesEl.appendChild(metaDiv);
+  const assistantDiv = addMessage("assistant", "");
+
+  setStatus("检索并生成中...");
+  sendBtn.disabled = true;
+  stopBtn.disabled = false;
+  currentController = new AbortController();
+  let fullText = "";
+  ttsBuffer = "";
+
+  try {
+    const resp = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, session_id: SESSION_ID }),
+      signal: currentController.signal,
+    });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const parts = buf.split("\n\n");
+      buf = parts.pop();
+      for (const part of parts) {
+        if (!part.startsWith("data: ")) continue;
+        const data = JSON.parse(part.slice(6));
+        if (data.type === "meta") {
+          metaDiv.textContent = "检索距离: " + data.distances;
+        } else if (data.type === "token") {
+          fullText += data.content;
+          assistantDiv.textContent = fullText;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+          ttsBuffer += data.content;
+          let idx;
+          while ((idx = ttsBuffer.search(/[。！？!?；;\n]/)) !== -1) {
+            const sentence = ttsBuffer.slice(0, idx + 1);
+            ttsBuffer = ttsBuffer.slice(idx + 1);
+            speak(sentence);
+          }
+        } else if (data.type === "done") {
+          if (ttsBuffer.trim()) speak(ttsBuffer);
+          ttsBuffer = "";
+        }
+      }
+    }
+    setStatus("完成");
+  } catch (e) {
+    if (e.name === "AbortError") {
+      setStatus("已中断");
+      assistantDiv.textContent = fullText + " …（已中断）";
+    } else {
+      setStatus("错误: " + e.message);
+      assistantDiv.textContent = fullText + "\n[错误: " + e.message + "]";
+    }
+    stopTTS();
+  } finally {
+    currentController = null;
+    sendBtn.disabled = false;
+    stopBtn.disabled = true;
+  }
+}
+
+async function startRecording() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioContext = new AudioContext({ sampleRate: 16000 });
+    const source = audioContext.createMediaStreamSource(mediaStream);
+    processor = audioContext.createScriptProcessor(4096, 1, 1);
+    pcmChunks = [];
+    processor.onaudioprocess = (e) => {
+      const d = e.inputBuffer.getChannelData(0);
+      const i16 = new Int16Array(d.length);
+      for (let i = 0; i < d.length; i++) {
+        const s = Math.max(-1, Math.min(1, d[i]));
+        i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      pcmChunks.push(i16);
+    };
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+    recording = true;
+    recordBtn.textContent = "⏹ 停止录音";
+    recordBtn.classList.add("recording");
+    setStatus("录音中...");
+  } catch (e) {
+    setStatus("麦克风错误: " + e.message);
+  }
+}
+
+async function stopRecording() {
+  if (!recording) return;
+  recording = false;
+  recordBtn.textContent = "🎤 语音输入";
+  recordBtn.classList.remove("recording");
+
+  if (processor) processor.disconnect();
+  if (audioContext) await audioContext.close();
+  if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+
+  let total = 0;
+  for (const c of pcmChunks) total += c.length;
+  const merged = new Int16Array(total);
+  let off = 0;
+  for (const c of pcmChunks) { merged.set(c, off); off += c.length; }
+  const blob = new Blob([merged.buffer], { type: "application/octet-stream" });
+
+  setStatus("识别中...");
+  const form = new FormData();
+  form.append("audio", blob, "audio.pcm");
+
+  try {
+    const resp = await fetch("/api/transcribe", { method: "POST", body: form });
+    const data = await resp.json();
+    if (data.text) {
+      setStatus("识别: " + data.text);
+      await sendQuestion(data.text);
+    } else {
+      setStatus("未识别到内容，请重试");
+    }
+  } catch (e) {
+    setStatus("识别错误: " + e.message);
+  }
+}
+
+sendBtn.addEventListener("click", () => sendQuestion(inputEl.value));
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendQuestion(inputEl.value);
+  }
+});
+recordBtn.addEventListener("click", () => recording ? stopRecording() : startRecording());
+stopBtn.addEventListener("click", () => {
+  if (currentController) currentController.abort();
+  stopTTS();
+});
+clearBtn.addEventListener("click", async () => {
+  await fetch("/api/clear?session_id=" + SESSION_ID, { method: "POST" });
+  messagesEl.innerHTML = "";
+  setStatus("历史已清空");
+});
+reindexBtn.addEventListener("click", async () => {
+  reindexBtn.disabled = true;
+  setStatus("重建知识库中...");
+  try {
+    const r = await fetch("/api/reindex", { method: "POST" });
+    const d = await r.json();
+    if (d.ok) {
+      setStatus(`知识库已更新，共 ${d.count} 条片段`);
+      await loadConfig();
+    } else {
+      setStatus("刷新失败: " + d.error);
+    }
+  } catch (e) {
+    setStatus("刷新失败: " + e.message);
+  } finally {
+    reindexBtn.disabled = false;
+  }
+});
+
+loadConfig();
+speechSynthesis.onvoiceschanged = () => {};
+</script>
+</body>
+</html>
