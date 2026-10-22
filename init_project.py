@@ -18,6 +18,7 @@ from config import (
     OLLAMA_URL, CHAT_MODEL, EMBED_MODEL,
     VOSK_MODEL_NAME, VOSK_MODEL_PATH, MODELS_DIR, DOC_DIR,
 )
+from rag_engine import RAGEngine
 
 import ollama
 
@@ -106,9 +107,9 @@ def init_kb() -> bool:
         print(f"  请放入 .txt 或 .md 文件后重启")
         return False
 
-    from build_index import build_index
     try:
-        build_index(verbose=True)
+        rag = RAGEngine()
+        rag.build_index(verbose=True)
         return True
     except Exception as e:
         print(f"  ✗ 构建失败: {e}")
