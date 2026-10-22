@@ -43,8 +43,7 @@ def check_ollama() -> bool:
         return True
     except Exception as e:
         print(f"  ✗ 无法连接: {e}")
-        print("  请先启动 Ollama（安装后通常自动运行，或终端运行 ollama serve）")
-        print("  下载地址: https://ollama.com/download")
+        print("  请先启动 Ollama，并在终端或官网重新运行")
         return False
 
 
@@ -94,8 +93,7 @@ def download_vosk() -> bool:
         return True
     except Exception as e:
         print(f"  ✗ 下载失败: {e}")
-        print(f"  请手动下载 {VOSK_URL}")
-        print(f"  解压到 {MODELS_DIR}")
+        print(f"  请手动下载后解压到 {MODELS_DIR}")
         return False
 
 
